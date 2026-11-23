@@ -1,0 +1,476 @@
+name: Build Radio APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Write app source
+        run: |
+          mkdir -p "$(dirname 'app/settings.gradle')"
+          cat > 'app/settings.gradle' <<'RADIO_EOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = 'Radio'
+          RADIO_EOF
+          mkdir -p "$(dirname 'app/build.gradle')"
+          cat > 'app/build.gradle' <<'RADIO_EOF'
+          plugins {
+              id 'com.android.application' version '8.5.2'
+          }
+
+          android {
+              namespace 'il.joe.radio'
+              compileSdk 34
+              defaultConfig {
+                  applicationId 'il.joe.radio'
+                  minSdk 28
+                  targetSdk 34
+                  versionCode 1
+                  versionName '1.0'
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+
+          tasks.withType(JavaCompile).configureEach { options.encoding = 'UTF-8' }
+
+          dependencies {
+              implementation 'androidx.media3:media3-exoplayer:1.4.1'
+              implementation 'androidx.media3:media3-exoplayer-hls:1.4.1'
+              implementation 'androidx.media3:media3-session:1.4.1'
+              implementation 'androidx.annotation:annotation:1.8.0'
+          }
+          RADIO_EOF
+          mkdir -p "$(dirname 'app/gradle.properties')"
+          cat > 'app/gradle.properties' <<'RADIO_EOF'
+          android.useAndroidX=true
+          org.gradle.jvmargs=-Xmx2g
+          RADIO_EOF
+          mkdir -p "$(dirname 'app/src/main/AndroidManifest.xml')"
+          cat > 'app/src/main/AndroidManifest.xml' <<'RADIO_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.WAKE_LOCK" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+              <application
+                  android:label="הרדיו שלי"
+                  android:icon="@drawable/ic_radio"
+                  android:roundIcon="@drawable/ic_radio"
+                  android:supportsRtl="true"
+                  android:usesCleartextTraffic="true"
+                  android:theme="@android:style/Theme.Material.NoActionBar">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTop"
+                      android:screenOrientation="portrait">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+                  <service
+                      android:name=".MainActivity$PlaybackService"
+                      android:exported="true"
+                      android:foregroundServiceType="mediaPlayback">
+                      <intent-filter>
+                          <action android:name="androidx.media3.session.MediaSessionService" />
+                      </intent-filter>
+                  </service>
+              </application>
+          </manifest>
+          RADIO_EOF
+          mkdir -p "$(dirname 'app/src/main/res/drawable/ic_radio.xml')"
+          cat > 'app/src/main/res/drawable/ic_radio.xml' <<'RADIO_EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp" android:height="108dp"
+              android:viewportWidth="108" android:viewportHeight="108">
+              <path android:fillColor="#0F1521" android:pathData="M0,0h108v108h-108z" />
+              <path android:fillColor="#4C8DFF" android:pathData="M30,44h48a6,6 0,0 1,6 6v24a6,6 0,0 1,-6 6h-48a6,6 0,0 1,-6 -6v-24a6,6 0,0 1,6 -6z" />
+              <path android:fillColor="#F2994A" android:pathData="M40,62m-9,0a9,9 0,1 1,18 0a9,9 0,1 1,-18 0" />
+              <path android:fillColor="#F2F4F8" android:pathData="M56,55h20v4h-20zM56,63h20v4h-20z" />
+              <path android:fillColor="#F2F4F8" android:pathData="M36,43l38,-14l1.4,3.8l-38,14z" />
+          </vector>
+          RADIO_EOF
+          mkdir -p "$(dirname 'app/src/main/java/il/joe/radio/MainActivity.java')"
+          cat > 'app/src/main/java/il/joe/radio/MainActivity.java' <<'RADIO_EOF'
+          package il.joe.radio;
+
+          import android.app.Activity;
+          import android.app.AlertDialog;
+          import android.app.PendingIntent;
+          import android.content.ComponentName;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.graphics.Color;
+          import android.graphics.Typeface;
+          import android.graphics.drawable.GradientDrawable;
+          import android.media.AudioManager;
+          import android.os.Bundle;
+          import android.text.InputType;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.widget.Button;
+          import android.widget.EditText;
+          import android.widget.LinearLayout;
+          import android.widget.ScrollView;
+          import android.widget.TextView;
+          import android.widget.Toast;
+
+          import androidx.annotation.NonNull;
+          import androidx.media3.common.AudioAttributes;
+          import androidx.media3.common.C;
+          import androidx.media3.common.MediaItem;
+          import androidx.media3.common.MediaMetadata;
+          import androidx.media3.common.MimeTypes;
+          import androidx.media3.common.PlaybackException;
+          import androidx.media3.common.Player;
+          import androidx.media3.exoplayer.ExoPlayer;
+          import androidx.media3.session.MediaController;
+          import androidx.media3.session.MediaSession;
+          import androidx.media3.session.MediaSessionService;
+          import androidx.media3.session.SessionToken;
+
+          import com.google.common.util.concurrent.ListenableFuture;
+
+          public class MainActivity extends Activity {
+
+              // ---- התחנות ----
+              static final String[] IDS = {"galei", "c14"};
+              static final String[] NAMES = {"גלי ישראל", "ערוץ 14"};
+              static final String[] SUBS = {"94FM · 106.5FM · שידור חי", "אודיו בלבד מהשידור החי"};
+              static final String[] DEFAULT_URLS = {
+                      "https://cdn.cybercdn.live/Galei_Israel/Live/icecast.audio",
+                      "https://n-121-5.il.cdn-redge.media/livehls/oil/ch14/live/ch14/live.livx/playlist.m3u8?bitrate=1928000&audioId=1"
+              };
+              static final int[] ACCENTS = {0xFFF2994A, 0xFF4C8DFF};
+
+              static final int BG = 0xFF0F1521;
+              static final int CARD = 0xFF1A2232;
+              static final int TEXT = 0xFFF2F4F8;
+              static final int MUTED = 0xFF8C96AA;
+
+              private SharedPreferences prefs;
+              private ListenableFuture<MediaController> controllerFuture;
+              private MediaController controller;
+              private final LinearLayout[] cards = new LinearLayout[2];
+              private final TextView[] statusViews = new TextView[2];
+              private final TextView[] iconViews = new TextView[2];
+              private String lastError = null;
+              private String errorStation = null;
+
+              private final Player.Listener listener = new Player.Listener() {
+                  @Override public void onEvents(@NonNull Player player, @NonNull Player.Events events) { refresh(); }
+                  @Override public void onPlayerError(@NonNull PlaybackException error) {
+                      MediaItem item = controller != null ? controller.getCurrentMediaItem() : null;
+                      errorStation = item != null ? item.mediaId : null;
+                      lastError = "השידור לא נטען. לחיצה ארוכה לעדכון הקישור";
+                      refresh();
+                  }
+              };
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  prefs = getSharedPreferences("radio", MODE_PRIVATE);
+                  setVolumeControlStream(AudioManager.STREAM_MUSIC);
+                  getWindow().setStatusBarColor(BG);
+                  getWindow().setNavigationBarColor(BG);
+                  setContentView(buildUi());
+              }
+
+              @Override
+              protected void onStart() {
+                  super.onStart();
+                  SessionToken token = new SessionToken(this, new ComponentName(this, PlaybackService.class));
+                  controllerFuture = new MediaController.Builder(this, token).buildAsync();
+                  controllerFuture.addListener(() -> {
+                      try {
+                          controller = controllerFuture.get();
+                          controller.addListener(listener);
+                          refresh();
+                      } catch (Exception e) {
+                          Toast.makeText(this, "שגיאה בהפעלת הנגן", Toast.LENGTH_LONG).show();
+                      }
+                  }, getMainExecutor());
+              }
+
+              @Override
+              protected void onStop() {
+                  if (controller != null) controller.removeListener(listener);
+                  MediaController.releaseFuture(controllerFuture);
+                  controller = null;
+                  super.onStop();
+              }
+
+              private int dp(float v) { return Math.round(v * getResources().getDisplayMetrics().density); }
+
+              private View buildUi() {
+                  ScrollView scroll = new ScrollView(this);
+                  scroll.setBackgroundColor(BG);
+                  scroll.setFillViewport(true);
+
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
+                  root.setPadding(dp(20), dp(36), dp(20), dp(24));
+                  scroll.addView(root);
+
+                  TextView title = new TextView(this);
+                  title.setText("הרדיו שלי");
+                  title.setTextColor(TEXT);
+                  title.setTextSize(30);
+                  title.setTypeface(Typeface.DEFAULT_BOLD);
+                  root.addView(title);
+
+                  TextView hint = new TextView(this);
+                  hint.setText("לחיצה מנגנת או עוצרת. ממשיך לנגן גם כשהמסך כבוי.");
+                  hint.setTextColor(MUTED);
+                  hint.setTextSize(14);
+                  hint.setPadding(0, dp(4), 0, dp(20));
+                  root.addView(hint);
+
+                  for (int i = 0; i < 2; i++) root.addView(buildCard(i));
+
+                  Button stop = new Button(this);
+                  stop.setText("עצור הכל");
+                  stop.setTextColor(TEXT);
+                  stop.setTextSize(17);
+                  stop.setAllCaps(false);
+                  GradientDrawable sb = new GradientDrawable();
+                  sb.setCornerRadius(dp(14));
+                  sb.setColor(0xFF2A3346);
+                  stop.setBackground(sb);
+                  LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(56));
+                  slp.topMargin = dp(8);
+                  stop.setLayoutParams(slp);
+                  stop.setOnClickListener(v -> { if (controller != null) { controller.stop(); controller.clearMediaItems(); } lastError = null; refresh(); });
+                  root.addView(stop);
+
+                  TextView foot = new TextView(this);
+                  foot.setText("קישור הפסיק לעבוד? לחיצה ארוכה על התחנה ומדביקים קישור חדש.");
+                  foot.setTextColor(MUTED);
+                  foot.setTextSize(13);
+                  foot.setPadding(0, dp(18), 0, 0);
+                  root.addView(foot);
+                  return scroll;
+              }
+
+              private View buildCard(int i) {
+                  LinearLayout card = new LinearLayout(this);
+                  card.setOrientation(LinearLayout.HORIZONTAL);
+                  card.setGravity(Gravity.CENTER_VERTICAL);
+                  card.setPadding(dp(18), dp(20), dp(18), dp(20));
+                  LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+                  lp.bottomMargin = dp(14);
+                  card.setLayoutParams(lp);
+
+                  TextView icon = new TextView(this);
+                  icon.setText("▶");
+                  icon.setTextSize(22);
+                  icon.setTextColor(Color.WHITE);
+                  icon.setGravity(Gravity.CENTER);
+                  GradientDrawable ib = new GradientDrawable();
+                  ib.setShape(GradientDrawable.OVAL);
+                  ib.setColor(ACCENTS[i]);
+                  icon.setBackground(ib);
+                  icon.setLayoutParams(new LinearLayout.LayoutParams(dp(60), dp(60)));
+                  card.addView(icon);
+
+                  LinearLayout texts = new LinearLayout(this);
+                  texts.setOrientation(LinearLayout.VERTICAL);
+                  texts.setPadding(dp(16), 0, 0, 0);
+                  texts.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+
+                  TextView name = new TextView(this);
+                  name.setText(NAMES[i]);
+                  name.setTextColor(TEXT);
+                  name.setTextSize(22);
+                  name.setTypeface(Typeface.DEFAULT_BOLD);
+                  texts.addView(name);
+
+                  TextView sub = new TextView(this);
+                  sub.setText(SUBS[i]);
+                  sub.setTextColor(MUTED);
+                  sub.setTextSize(14);
+                  texts.addView(sub);
+
+                  TextView status = new TextView(this);
+                  status.setTextSize(14);
+                  status.setPadding(0, dp(6), 0, 0);
+                  texts.addView(status);
+                  card.addView(texts);
+
+                  card.setOnClickListener(v -> toggle(i));
+                  card.setOnLongClickListener(v -> { editUrl(i); return true; });
+                  cards[i] = card;
+                  statusViews[i] = status;
+                  iconViews[i] = icon;
+                  return card;
+              }
+
+              private String urlFor(int i) { return prefs.getString("url_" + IDS[i], DEFAULT_URLS[i]); }
+
+              private String currentId() {
+                  if (controller == null) return null;
+                  MediaItem item = controller.getCurrentMediaItem();
+                  return item == null ? null : item.mediaId;
+              }
+
+              private void toggle(int i) {
+                  if (controller == null) { Toast.makeText(this, "הנגן עוד נטען, נסה שוב", Toast.LENGTH_SHORT).show(); return; }
+                  boolean isThis = IDS[i].equals(currentId()) && controller.getPlaybackState() != Player.STATE_IDLE;
+                  if (isThis && controller.getPlayWhenReady()) { controller.stop(); refresh(); return; }
+                  play(i);
+              }
+
+              private void play(int i) {
+                  lastError = null;
+                  MediaItem.Builder b = new MediaItem.Builder()
+                          .setMediaId(IDS[i])
+                          .setUri(urlFor(i))
+                          .setMediaMetadata(new MediaMetadata.Builder()
+                                  .setTitle(NAMES[i])
+                                  .setArtist("שידור חי")
+                                  .build());
+                  String url = urlFor(i).toLowerCase();
+                  if (url.contains(".m3u8")) b.setMimeType(MimeTypes.APPLICATION_M3U8);
+                  controller.setMediaItem(b.build());
+                  controller.prepare();
+                  controller.play();
+                  refresh();
+              }
+
+              private void editUrl(int i) {
+                  EditText input = new EditText(this);
+                  input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+                  input.setText(urlFor(i));
+                  input.setSelectAllOnFocus(true);
+                  input.setTextDirection(View.TEXT_DIRECTION_LTR);
+                  new AlertDialog.Builder(this)
+                          .setTitle("קישור השידור של " + NAMES[i])
+                          .setView(input)
+                          .setPositiveButton("שמור", (d, w) -> {
+                              String u = input.getText().toString().trim();
+                              if (!u.isEmpty()) prefs.edit().putString("url_" + IDS[i], u).apply();
+                              Toast.makeText(this, "נשמר", Toast.LENGTH_SHORT).show();
+                          })
+                          .setNeutralButton("קישור מקורי", (d, w) -> {
+                              prefs.edit().remove("url_" + IDS[i]).apply();
+                              Toast.makeText(this, "חזר לקישור המקורי", Toast.LENGTH_SHORT).show();
+                          })
+                          .setNegativeButton("ביטול", null)
+                          .show();
+              }
+
+              private void refresh() {
+                  String cur = currentId();
+                  boolean active = controller != null && controller.getPlaybackState() != Player.STATE_IDLE && controller.getPlayWhenReady();
+                  boolean buffering = controller != null && controller.getPlaybackState() == Player.STATE_BUFFERING;
+                  for (int i = 0; i < 2; i++) {
+                      if (cards[i] == null) continue;
+                      boolean on = active && IDS[i].equals(cur);
+                      GradientDrawable bg = new GradientDrawable();
+                      bg.setCornerRadius(dp(20));
+                      bg.setColor(CARD);
+                      bg.setStroke(dp(on ? 2 : 1), on ? ACCENTS[i] : 0xFF263047);
+                      cards[i].setBackground(bg);
+                      iconViews[i].setText(on ? "■" : "▶");
+                      if (on && buffering) { statusViews[i].setText("מתחבר…"); statusViews[i].setTextColor(MUTED); }
+                      else if (on) { statusViews[i].setText("● מנגן עכשיו"); statusViews[i].setTextColor(ACCENTS[i]); }
+                      else if (lastError != null && IDS[i].equals(errorStation)) { statusViews[i].setText(lastError); statusViews[i].setTextColor(0xFFFF6B6B); }
+                      else { statusViews[i].setText("לחץ להאזנה"); statusViews[i].setTextColor(MUTED); }
+                  }
+              }
+
+              // ---- שירות הניגון ברקע (התראה + מסך נעילה + אוזניות) ----
+              public static class PlaybackService extends MediaSessionService {
+                  private MediaSession session;
+
+                  @Override
+                  public void onCreate() {
+                      super.onCreate();
+                      ExoPlayer player = new ExoPlayer.Builder(this)
+                              .setAudioAttributes(new AudioAttributes.Builder()
+                                      .setUsage(C.USAGE_MEDIA)
+                                      .setContentType(C.AUDIO_CONTENT_TYPE_SPEECH)
+                                      .build(), true)
+                              .setHandleAudioBecomingNoisy(true)
+                              .setWakeMode(C.WAKE_MODE_NETWORK)
+                              .build();
+                      // רק אודיו: לא מורידים וידאו של ערוץ 14
+                      player.setTrackSelectionParameters(player.getTrackSelectionParameters()
+                              .buildUpon()
+                              .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, true)
+                              .build());
+                      PendingIntent open = PendingIntent.getActivity(this, 0,
+                              new Intent(this, MainActivity.class),
+                              PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+                      session = new MediaSession.Builder(this, player).setSessionActivity(open).build();
+                  }
+
+                  @Override
+                  public MediaSession onGetSession(@NonNull MediaSession.ControllerInfo controllerInfo) { return session; }
+
+                  @Override
+                  public void onTaskRemoved(Intent rootIntent) {
+                      Player p = session.getPlayer();
+                      if (!p.getPlayWhenReady() || p.getMediaItemCount() == 0) stopSelf();
+                  }
+
+                  @Override
+                  public void onDestroy() {
+                      if (session != null) {
+                          session.getPlayer().release();
+                          session.release();
+                          session = null;
+                      }
+                      super.onDestroy();
+                  }
+              }
+          }
+          RADIO_EOF
+
+      - name: Build APK
+        working-directory: app
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - name: Publish APK
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk HaRadioSheli.apk
+          gh release create "v${{ github.run_number }}" HaRadioSheli.apk \
+            --repo "${{ github.repository }}" \
+            --title "הרדיו שלי - גרסה ${{ github.run_number }}" \
+            --notes "גלי ישראל + ערוץ 14 (אודיו). להורדה: HaRadioSheli.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HaRadioSheli
+          path: HaRadioSheli.apk
